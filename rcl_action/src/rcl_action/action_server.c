@@ -101,6 +101,8 @@ rcl_action_get_zero_initialized_server(void)
     goto fail; \
   }
 
+RCL_ACTION_PUBLIC
+RCL_WARN_UNUSED
 rcl_ret_t
 rcl_action_server_init(
   rcl_action_server_t * action_server,
@@ -111,12 +113,54 @@ rcl_action_server_init(
   const rcl_action_server_options_t * options)
 {
   RCL_CHECK_ARGUMENT_FOR_NULL(action_server, RCL_RET_INVALID_ARGUMENT);
-  if (!rcl_node_is_valid(node)) {
-    return RCL_RET_NODE_INVALID;  // error already set
-  }
   if (!rcl_clock_valid(clock)) {
     RCL_SET_ERROR_MSG("invalid clock");
     return RCL_RET_INVALID_ARGUMENT;
+  }
+  if (!rcl_node_is_valid(node)) {
+    return RCL_RET_NODE_INVALID;  // error already set
+  }
+
+  RCL_CHECK_ARGUMENT_FOR_NULL(options, RCL_RET_INVALID_ARGUMENT);
+  rcl_allocator_t allocator = options->allocator;
+  RCL_CHECK_ALLOCATOR_WITH_MSG(&allocator, "invalid allocator", return RCL_RET_INVALID_ARGUMENT);
+
+  rcl_timer_t expire_timer = rcl_get_zero_initialized_timer();
+
+  // Initialize Timer, disabled by default so it doesn't start firing
+  rcl_ret_t ret = rcl_timer_init2(
+    &expire_timer, clock, node->context,
+    options->result_timeout.nanoseconds, NULL, allocator, false);
+  if (RCL_RET_OK != ret) {
+    return ret;
+  }
+
+  ret = rcl_action_server_init2(action_server, node, &expire_timer,
+                                type_support, action_name, options);
+  if(ret != RCL_RET_OK) {
+    // we need to release the timer in error case
+    if (rcl_timer_fini(&expire_timer) != RCL_RET_OK) {
+      ret = RCL_RET_ERROR;
+    }
+  } else {
+    action_server->impl->owns_expire_timer = true;
+  }
+
+  return ret;
+}
+
+rcl_ret_t
+rcl_action_server_init2(
+  rcl_action_server_t * action_server,
+  rcl_node_t * node,
+  const rcl_timer_t * expire_timer,
+  const rosidl_action_type_support_t * type_support,
+  const char * action_name,
+  const rcl_action_server_options_t * options)
+{
+  RCL_CHECK_ARGUMENT_FOR_NULL(action_server, RCL_RET_INVALID_ARGUMENT);
+  if (!rcl_node_is_valid(node)) {
+    return RCL_RET_NODE_INVALID;  // error already set
   }
   RCL_CHECK_ARGUMENT_FOR_NULL(type_support, RCL_RET_INVALID_ARGUMENT);
   RCL_CHECK_ARGUMENT_FOR_NULL(action_name, RCL_RET_INVALID_ARGUMENT);
@@ -141,7 +185,8 @@ rcl_action_server_init(
   action_server->impl->goal_service = rcl_get_zero_initialized_service();
   action_server->impl->cancel_service = rcl_get_zero_initialized_service();
   action_server->impl->result_service = rcl_get_zero_initialized_service();
-  action_server->impl->expire_timer = rcl_get_zero_initialized_timer();
+  action_server->impl->expire_timer = *expire_timer;
+  action_server->impl->owns_expire_timer = false;
   action_server->impl->feedback_publisher = rcl_get_zero_initialized_publisher();
   action_server->impl->status_publisher = rcl_get_zero_initialized_publisher();
   action_server->impl->remapped_action_name = NULL;
@@ -152,6 +197,7 @@ rcl_action_server_init(
   action_server->impl->type_hash = rosidl_get_zero_initialized_type_hash();
 
   rcl_ret_t ret = RCL_RET_OK;
+
   // Resolve action name
   ret = rcl_node_resolve_name(
     node,
@@ -175,6 +221,12 @@ rcl_action_server_init(
     action_server->impl->remapped_action_name
   );
 
+  // Store reference to clock
+  ret = rcl_timer_clock(&action_server->impl->expire_timer, &(action_server->impl->clock));
+  if (RCL_RET_OK != ret) {
+    goto fail;
+  }
+
   // Initialize services
   SERVICE_INIT(goal);
   SERVICE_INIT(cancel);
@@ -184,13 +236,15 @@ rcl_action_server_init(
   PUBLISHER_INIT(feedback);
   PUBLISHER_INIT(status);
 
-  // Store reference to clock
-  action_server->impl->clock = clock;
+  int64_t do_not_care;
+  ret = rcl_timer_exchange_period(&action_server->impl->expire_timer,
+                                  options->result_timeout.nanoseconds, &do_not_care);
+  if (RCL_RET_OK != ret) {
+    goto fail;
+  }
 
-  // Initialize Timer, disabled by default so it doesn't start firing
-  ret = rcl_timer_init2(
-    &action_server->impl->expire_timer, action_server->impl->clock, node->context,
-    options->result_timeout.nanoseconds, NULL, allocator, false);
+  // Cancel timer so it doesn't start firing
+  ret = rcl_timer_cancel(&action_server->impl->expire_timer);
   if (RCL_RET_OK != ret) {
     goto fail;
   }
@@ -203,6 +257,7 @@ rcl_action_server_init(
   if (RCL_RET_OK != ret) {
     rcutils_reset_error();
     RCL_SET_ERROR_MSG("Failed to register type for action");
+    ret = RCL_RET_ERROR;
     goto fail;
   }
   action_server->impl->type_hash = *type_support->get_type_hash_func(type_support);
@@ -246,9 +301,16 @@ rcl_action_server_fini(rcl_action_server_t * action_server, rcl_node_t * node)
     if (rcl_publisher_fini(&action_server->impl->status_publisher, node) != RCL_RET_OK) {
       ret = RCL_RET_ERROR;
     }
-    // Finalize timer
-    if (rcl_timer_fini(&action_server->impl->expire_timer) != RCL_RET_OK) {
+
+    // cancel the timer, in case we don't own it
+    if (rcl_timer_cancel(&action_server->impl->expire_timer) != RCL_RET_OK) {
       ret = RCL_RET_ERROR;
+    }
+    if (action_server->impl->owns_expire_timer) {
+      // Finalize timer
+      if (rcl_timer_fini(&action_server->impl->expire_timer) != RCL_RET_OK) {
+        ret = RCL_RET_ERROR;
+      }
     }
     // Ditch clock reference
     action_server->impl->clock = NULL;

@@ -68,14 +68,14 @@ void _rcl_timer_time_jump(
   bool before_jump,
   void * user_data)
 {
-  rcl_timer_t * timer = (rcl_timer_t *)user_data;
+  rcl_timer_impl_t * impl = (rcl_timer_impl_t *)user_data;
 
   if (before_jump) {
     if (RCL_ROS_TIME_ACTIVATED == time_jump->clock_change ||
       RCL_ROS_TIME_DEACTIVATED == time_jump->clock_change)
     {
       rcl_time_point_value_t now;
-      if (RCL_RET_OK != rcl_clock_get_now(timer->impl->clock, &now)) {
+      if (RCL_RET_OK != rcl_clock_get_now(impl->clock, &now)) {
         RCUTILS_LOG_ERROR_NAMED(ROS_PACKAGE_NAME, "Failed to get current time in jump callback");
         return;
       }
@@ -85,18 +85,18 @@ void _rcl_timer_time_jump(
         // No time credit if clock is uninitialized
         return;
       }
-      const int64_t next_call_time = rcutils_atomic_load_int64_t(&timer->impl->next_call_time);
-      rcutils_atomic_store(&timer->impl->time_credit, next_call_time - now);
+      const int64_t next_call_time = rcutils_atomic_load_int64_t(&impl->next_call_time);
+      rcutils_atomic_store(&impl->time_credit, next_call_time - now);
     }
   } else {
     rcl_time_point_value_t now;
-    if (RCL_RET_OK != rcl_clock_get_now(timer->impl->clock, &now)) {
+    if (RCL_RET_OK != rcl_clock_get_now(impl->clock, &now)) {
       RCUTILS_LOG_ERROR_NAMED(ROS_PACKAGE_NAME, "Failed to get current time in jump callback");
       return;
     }
-    const int64_t last_call_time = rcutils_atomic_load_int64_t(&timer->impl->last_call_time);
-    const int64_t next_call_time = rcutils_atomic_load_int64_t(&timer->impl->next_call_time);
-    const int64_t period = rcutils_atomic_load_int64_t(&timer->impl->period);
+    const int64_t last_call_time = rcutils_atomic_load_int64_t(&impl->last_call_time);
+    const int64_t next_call_time = rcutils_atomic_load_int64_t(&impl->next_call_time);
+    const int64_t period = rcutils_atomic_load_int64_t(&impl->period);
     if (RCL_ROS_TIME_ACTIVATED == time_jump->clock_change ||
       RCL_ROS_TIME_DEACTIVATED == time_jump->clock_change)
     {
@@ -105,23 +105,23 @@ void _rcl_timer_time_jump(
         // Can't apply time credit if clock is uninitialized
         return;
       }
-      int64_t time_credit = rcutils_atomic_exchange_int64_t(&timer->impl->time_credit, 0);
+      int64_t time_credit = rcutils_atomic_exchange_int64_t(&impl->time_credit, 0);
       if (time_credit) {
         // set times in new epoch so timer only waits the remainder of the period
-        rcutils_atomic_store(&timer->impl->next_call_time, now - time_credit + period);
-        rcutils_atomic_store(&timer->impl->last_call_time, now - time_credit);
+        rcutils_atomic_store(&impl->next_call_time, now - time_credit + period);
+        rcutils_atomic_store(&impl->last_call_time, now - time_credit);
       }
     } else if (next_call_time <= now) {
       // Post Forward jump and timer is ready
-      if (RCL_RET_OK != rcl_trigger_guard_condition(&timer->impl->guard_condition)) {
+      if (RCL_RET_OK != rcl_trigger_guard_condition(&impl->guard_condition)) {
         RCUTILS_LOG_ERROR_NAMED(
           ROS_PACKAGE_NAME, "Failed to get trigger guard condition in jump callback");
       }
     } else if (now < last_call_time) {
       // Post backwards time jump that went further back than 1 period
       // next callback should happen after 1 period
-      rcutils_atomic_store(&timer->impl->next_call_time, now + period);
-      rcutils_atomic_store(&timer->impl->last_call_time, now);
+      rcutils_atomic_store(&impl->next_call_time, now + period);
+      rcutils_atomic_store(&impl->last_call_time, now);
       return;
     }
   }
@@ -164,21 +164,7 @@ rcl_timer_init2(
   if (RCL_RET_OK != ret) {
     return ret;
   }
-  if (RCL_ROS_TIME == impl.clock->type) {
-    rcl_jump_threshold_t threshold;
-    threshold.on_clock_change = true;
-    threshold.min_forward.nanoseconds = 1;
-    threshold.min_backward.nanoseconds = -1;
-    ret = rcl_clock_add_jump_callback(clock, threshold, _rcl_timer_time_jump, timer);
-    if (RCL_RET_OK != ret) {
-      if (RCL_RET_OK != rcl_guard_condition_fini(&(impl.guard_condition))) {
-        // Should be impossible
-        RCUTILS_LOG_ERROR_NAMED(
-          ROS_PACKAGE_NAME, "Failed to fini guard condition after failing to add jump callback");
-      }
-      return ret;
-    }
-  }
+
   atomic_init(&impl.callback, (uintptr_t)callback);
   atomic_init(&impl.period, period);
   atomic_init(&impl.time_credit, 0);
@@ -209,6 +195,27 @@ rcl_timer_init2(
     return RCL_RET_BAD_ALLOC;
   }
   *timer->impl = impl;
+
+  if (RCL_ROS_TIME == impl.clock->type) {
+    rcl_jump_threshold_t threshold;
+    threshold.on_clock_change = true;
+    threshold.min_forward.nanoseconds = 1;
+    threshold.min_backward.nanoseconds = -1;
+    ret = rcl_clock_add_jump_callback(clock, threshold, _rcl_timer_time_jump, timer->impl);
+    if (RCL_RET_OK != ret) {
+      if (RCL_RET_OK != rcl_guard_condition_fini(&(impl.guard_condition))) {
+        // Should be impossible
+        RCUTILS_LOG_ERROR_NAMED(
+          ROS_PACKAGE_NAME, "Failed to fini guard condition after failing to add jump callback");
+      }
+
+      allocator.deallocate(timer->impl, allocator.state);
+      timer->impl = NULL;
+
+      return ret;
+    }
+  }
+
   TRACETOOLS_TRACEPOINT(rcl_timer_init, (const void *)timer, period);
   return RCL_RET_OK;
 }
@@ -226,7 +233,8 @@ rcl_timer_fini(rcl_timer_t * timer)
   if (RCL_ROS_TIME == timer->impl->clock->type) {
     // The jump callbacks use the guard condition, so we have to remove it
     // before freeing the guard condition below.
-    fail_ret = rcl_clock_remove_jump_callback(timer->impl->clock, _rcl_timer_time_jump, timer);
+    fail_ret = rcl_clock_remove_jump_callback(timer->impl->clock, _rcl_timer_time_jump,
+      timer->impl);
     if (RCL_RET_OK != fail_ret) {
       RCUTILS_LOG_ERROR_NAMED(ROS_PACKAGE_NAME, "Failed to remove timer jump callback");
     }
