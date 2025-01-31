@@ -2,6 +2,12 @@
 Changelog for package rcl_yaml_param_parser
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+10.0.2 (2025-01-31)
+-------------------
+* Cleanup errors after error paths in rcl_yaml_param_parser tests. (`#1203 <https://github.com/ros2/rcl/issues/1203>`_)
+  This gets rid of ugly "overwritten" warnings in the tests.
+* Contributors: Chris Lalancette
+
 10.0.1 (2024-11-20)
 -------------------
 

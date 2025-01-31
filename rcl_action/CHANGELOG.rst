@@ -2,6 +2,91 @@
 Changelog for package rcl_action
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+10.0.2 (2025-01-31)
+-------------------
+* fix(rcl_action): Allow to pass the timer to action during initialization (`#1201 <https://github.com/ros2/rcl/issues/1201>`_)
+  * fix(timer): Use impl pointer in jump callback
+  The interface description does not explicitly state that a
+  rcl_timer_t may not be copied around. Therefore users may do this.
+  By using a known never changing pointer in the callbacks, we avoid
+  segfaults, even if the 'user' decides to copy the rcl_timer_t around.
+* Added remapping resolution for action names (`#1170 <https://github.com/ros2/rcl/issues/1170>`_)
+  * Added remapping resolution for action names
+  * Fix cpplint/uncrustify
+  * Simplified returned error codes in case name resolution failes.
+  * Renamed action_name field to remapped_action_name.
+  * Removed unnecessary resolved_action_name stack variable
+  * Added tests for action name remapping.
+  * Add tests for action name remapping using local arguments
+  ---------
+* Clean up error handling in many rcl{_action,_lifecycle} codepaths (`#1202 <https://github.com/ros2/rcl/issues/1202>`_)
+  * Shorten the delay in test_action_server setup.
+  Instead of waiting 250ms between setting up 10 goals
+  (for at least 2.5 seconds), just wait 100ms which reduces
+  this to 1 second.
+  * Small style cleanups in test_action_server.cpp
+  * Reset the error in rcl_node_type_cache_register_type().
+  That is, if rcutils_hash_map_set() fails, it sets its
+  own error, so overriding it with our own will cause a
+  warning to print.  Make sure to clear it before setting
+  our own.
+  * Only unregister a clock jump callback if we have installed it.
+  This avoids a warning on cleanup in rcl_timer_init2.
+  * Record the return value from rcl_node_type_cache_register_type.
+  Otherwise, in a failure situation we set the error but we
+  actually return RCL_RET_OK to the upper layers, which is
+  odd.
+  * Get rid of completely unnecessary return value translation.
+  This generated code was translating an RCL error to an
+  RCL error, which doesn't make much sense.  Just remove
+  the duplicate code.
+  * Use the rcl_timer_init2 functionality to start the timer disabled.
+  Rather than starting it enabled, and then immediately
+  canceling it.
+  * Don't overwrite the error from rcl_action_goal_handle_get_info()
+  It already sets the error, so rcl_action_server_goal_exists()
+  should not set it again.
+  * Reset errors before setting new ones when checking action validity
+  That way we avoid an ugly warning in the error paths.
+  * Move the copying of the options earlier in rcl_subscription_init.
+  That way when we go to cleanup in the "fail" case, the
+  options actually exist and are valid.  This avoids an
+  ugly warning during cleanup.
+  * Make sure to set the error on failure of rcl_action_get\_##_service_name
+  This makes it match the generated code for the action_client.
+  * Reset the errors during RCUTILS_FAULT_INJECTION testing.
+  That way subsequent failures won't print out ugly error
+  strings.
+  * Make sure to return errors in _rcl_parse_resource_match .
+  That is, if rcl_lexer_lookahead2_expect() returns an error,
+  we should pass that along to higher layers rather than
+  just ignoring it.
+  * Don't overwrite error by rcl_validate_enclave_name.
+  It leads to ugly warnings.
+  * Add acomment that rmw_validate_namespace_with_size sets the error
+  * Make sure to reset error in rcl_node_type_cache_init.
+  Otherwise we get a warning about overwriting the error
+  from rcutils_hash_map_init.
+  * Conditionally set error message in rcl_publisher_is_valid.
+  Only when rcl_context_is_valid doesn't set the error.
+  * Don't overwrite error from rcl_node_get_logger_name.
+  It already sets the error in the failure case.
+  * Make sure to reset errors when testing network flow endpoints.
+  That's because some of the RMW implementations may not support
+  this feature, and thus set errors.
+  * Make sure to reset errors in rcl_expand_topic_name.
+  That way we can set more useful errors for the upper
+  layers.
+  * Cleanup wait.c error handling.
+  In particular, make sure to not overwrite errors as we
+  get into error-handling paths, which should clean up
+  warnings we get.
+  * Make sure to reset errors in rcl_lifecycle tests.
+  That way we won't get ugly "overwritten" warnings on
+  subsequent tests.
+  ---------
+* Contributors: Chris Lalancette, Janosch Machowinski, Justus Braun
+
 10.0.1 (2024-11-20)
 -------------------
 
